@@ -3,9 +3,9 @@ import yaml
 import httpx
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from backend.auth import get_current_user
-from backend.models import WorkspaceCreateRequest, WorkspaceCreateResponse
-from backend.k8s_client import create_kubedev_environment
+from auth import get_current_user
+from models import WorkspaceCreateRequest, WorkspaceCreateResponse
+from k8s_client import create_kubedev_environment
 
 
 app = FastAPI(title="KubeDev Auto System API", version="0.1.0")
