@@ -2,7 +2,6 @@ import os
 import sys
 import uvicorn
 
-# Try importing as a package; if that fails, add repo root to sys.path and retry
 try:
     from backend.app import app  # type: ignore
 except ModuleNotFoundError:
@@ -11,8 +10,8 @@ except ModuleNotFoundError:
         sys.path.insert(0, repo_root)
     from backend.app import app  # type: ignore
 
-
 if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(app, host=host, port=port)
+
