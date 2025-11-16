@@ -218,7 +218,7 @@ async def get_users_activity(
 
 
 @router.get("/templates-usage")
-async def get_templates_usage(db: Session = Depends(get_session)):
+async def get_templates_usage(db: Session = Depends(get_db)):
     """템플릿 사용 현황"""
     try:
         # 모든 템플릿과 사용 횟수 조회
@@ -308,7 +308,7 @@ async def cleanup_expired_environments(
 
 
 @router.get("/alerts")
-async def get_system_alerts(db: Session = Depends(get_session)):
+async def get_system_alerts(db: Session = Depends(get_db)):
     """시스템 알림 및 경고"""
     try:
         alerts = []
