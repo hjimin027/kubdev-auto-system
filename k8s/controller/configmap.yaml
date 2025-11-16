@@ -1,0 +1,217 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubedev-controller-code
+  namespace: kubedev-system
+data:
+  controller.py: |
+    import os
+    import kopf
+    from kubernetes import client, config
+    from kubernetes.client import V1ObjectMeta
+
+    # Try in-cluster config; fallback to local for dev
+    def load_kube_config():
+        try:
+            config.load_incluster_config()
+        except Exception:
+            try:
+                config.load_kube_config()
+            except Exception:
+                pass
+
+    def ns_name(user: str, name: str) -> str:
+        # workspace namespace: kubedev-<user>-<name>
+        safe_user = user.replace("_", "-").replace(".", "-")
+        safe_name = name.replace("_", "-").replace(".", "-")
+        return f"kubedev-{safe_user}-{safe_name}"[:63]
+
+    def label_selector(workspace_id: str) -> str:
+        return f"kubedev.io/workspace-id={workspace_id}"
+
+    def ensure_namespace(api: client.CoreV1Api, name: str, labels: dict):
+        try:
+            api.read_namespace(name)
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                ns = client.V1Namespace(metadata=client.V1ObjectMeta(name=name, labels=labels))
+                api.create_namespace(ns)
+            else:
+                raise
+
+    def ensure_pvc(api: client.CoreV1Api, namespace: str, pvc_name: str, size: str):
+        try:
+            api.read_namespaced_persistent_volume_claim(pvc_name, namespace)
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                pvc = client.V1PersistentVolumeClaim(
+                    metadata=client.V1ObjectMeta(name=pvc_name),
+                    spec=client.V1PersistentVolumeClaimSpec(
+                        access_modes=["ReadWriteOnce"],
+                        resources=client.V1ResourceRequirements(
+                            requests={"storage": size or "20Gi"}
+                        ),
+                    ),
+                )
+                api.create_namespaced_persistent_volume_claim(namespace, pvc)
+            else:
+                raise
+
+    def ensure_deployment(apps: client.AppsV1Api, namespace: str, name: str, image: str, env: dict, ports: list):
+        container_ports = [client.V1ContainerPort(container_port=8080)]
+        for p in ports:
+            if isinstance(p, int) and p != 8080:
+                container_ports.append(client.V1ContainerPort(container_port=p))
+        env_list = [client.V1EnvVar(name=k, value=v) for k, v in env.items() if v is not None]
+
+        # Simple start script: run INIT_CMD (best-effort), start code-server, then START_CMD
+        start_script = (
+            "set -e\n"
+            "echo '[kubedev] starting workspace'\n"
+            "mkdir -p /workspace\n"
+            "if [ ! -d /workspace/.git ] && [ -n \"$GIT_URL\" ]; then git clone --depth 1 -b \"${GIT_REF:-main}\" \"$GIT_URL\" /workspace || true; fi\n"
+            "if [ -n \"$INIT_CMD\" ]; then echo '[kubedev] running init'; sh -lc \"$INIT_CMD\" || true; fi\n"
+            "if command -v code-server >/dev/null 2>&1; then \
+               code-server --bind-addr 0.0.0.0:8080 --auth none --user-data-dir /workspace/.vscode --extensions-dir /workspace/.vscode/extensions & \
+             else \
+               echo '[kubedev] code-server not found; continuing'; \
+             fi\n"
+            "if [ -n \"$START_CMD\" ]; then echo '[kubedev] running start'; exec sh -lc \"$START_CMD\"; else tail -f /dev/null; fi\n"
+        )
+
+        pod_spec = client.V1PodSpec(
+            containers=[
+                client.V1Container(
+                    name="ide",
+                    image=image,
+                    image_pull_policy="IfNotPresent",
+                    env=env_list,
+                    ports=container_ports,
+                    command=["sh", "-lc"],
+                    args=[start_script],
+                    volume_mounts=[client.V1VolumeMount(mount_path="/workspace", name="workspace")],
+                )
+            ],
+            volumes=[client.V1Volume(name="workspace", persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name="ws"))],
+        )
+
+        spec = client.V1DeploymentSpec(
+            replicas=1,
+            selector=client.V1LabelSelector(match_labels={"app": name}),
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(labels={"app": name}),
+                spec=pod_spec,
+            ),
+        )
+        body = client.V1Deployment(metadata=client.V1ObjectMeta(name=name), spec=spec)
+        try:
+            apps.read_namespaced_deployment(name, namespace)
+            apps.patch_namespaced_deployment(name, namespace, body)
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                apps.create_namespaced_deployment(namespace, body)
+            else:
+                raise
+
+    def ensure_service(api: client.CoreV1Api, namespace: str, name: str, ports: list):
+        svc_ports = [client.V1ServicePort(name="ide", port=8080, target_port=8080)]
+        for p in ports:
+            if isinstance(p, int) and p != 8080:
+                svc_ports.append(client.V1ServicePort(name=f"p{p}", port=p, target_port=p))
+        body = client.V1Service(
+            metadata=client.V1ObjectMeta(name=name, labels={"app": name}),
+            spec=client.V1ServiceSpec(selector={"app": name}, ports=svc_ports, type="ClusterIP"),
+        )
+        try:
+            api.read_namespaced_service(name, namespace)
+            api.patch_namespaced_service(name, namespace, body)
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                api.create_namespaced_service(namespace, body)
+            else:
+                raise
+
+    def ensure_ingress(net: client.NetworkingV1Api, namespace: str, name: str, host: str):
+        path_type = "Prefix"
+        body = client.V1Ingress(
+            metadata=client.V1ObjectMeta(name=name),
+            spec=client.V1IngressSpec(
+                rules=[
+                    client.V1IngressRule(
+                        host=host,
+                        http=client.V1HTTPIngressRuleValue(
+                            paths=[
+                                client.V1HTTPIngressPath(
+                                    path="/",
+                                    path_type=path_type,
+                                    backend=client.V1IngressBackend(
+                                        service=client.V1IngressServiceBackend(
+                                            name=name, port=client.V1ServiceBackendPort(number=8080)
+                                        )
+                                    ),
+                                )
+                            ]
+                        ),
+                    )
+                ]
+            ),
+        )
+        try:
+            net.read_namespaced_ingress(name, namespace)
+            net.patch_namespaced_ingress(name, namespace, body)
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                net.create_namespaced_ingress(namespace, body)
+            else:
+                raise
+
+    @kopf.on.create('kubedev.my-project.com', 'v1alpha1', 'kubedevenvironments')
+    def create_fn(spec, name, namespace, status, patch, **_):
+        load_kube_config()
+        core = client.CoreV1Api()
+        apps = client.AppsV1Api()
+        net = client.NetworkingV1Api()
+
+        user = spec.get('userName')
+        template_id = spec.get('templateId')
+        git = spec.get('git') or {}
+        image = spec.get('image') or os.getenv('KUBEDEV_DEFAULT_IMAGE', 'ghcr.io/coder/code-server:latest')
+        commands = spec.get('commands') or {}
+        ports = spec.get('ports') or []
+        storage = (spec.get('storage') or {}).get('size', '20Gi')
+
+        workspace_ns = ns_name(user, name)
+        labels = {
+            'kubedev.io/workspace-id': name,
+            'kubedev.io/owner': user,
+        }
+        patch.status['phase'] = 'Provisioning'
+        patch.status['namespace'] = workspace_ns
+        patch.status['workspaceId'] = name
+
+        ensure_namespace(core, workspace_ns, labels)
+        ensure_pvc(core, workspace_ns, 'ws', storage)
+        env = {
+            'GIT_URL': git.get('repoUrl'),
+            'GIT_REF': git.get('ref', 'main'),
+            'INIT_CMD': commands.get('init'),
+            'START_CMD': commands.get('start'),
+        }
+        ensure_deployment(apps, workspace_ns, f"ide-{name}", image, env, ports)
+        ensure_service(core, workspace_ns, f"ide-{name}", ports)
+
+        host = os.getenv('KUBEDEV_IDE_DOMAIN', '')
+        ide_url = ''
+        if host:
+            host_fqdn = f"{user}.ide.{host}"
+            ensure_ingress(net, workspace_ns, f"ide-{name}", host_fqdn)
+            ide_url = f"https://{host_fqdn}"
+        patch.status['ideUrl'] = ide_url
+        patch.status['phase'] = 'Running'
+        kopf.event({'metadata': {'name': name, 'namespace': namespace}}, type='Normal', reason='Provisioned', message='Workspace ready')
+
+    @kopf.on.delete('kubedev.my-project.com', 'v1alpha1', 'kubedevenvironments')
+    def delete_fn(spec, name, namespace, status, **_):
+        # Rely on owner-managed NS cleanup strategy: here we do nothing.
+        pass
+
