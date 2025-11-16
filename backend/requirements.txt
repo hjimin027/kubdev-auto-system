@@ -20,7 +20,7 @@ pydantic-settings==2.1.0
 kubernetes==28.1.0
 
 # Redis for caching
-redis==5.0.1
+#redis==5.0.1
 
 # HTTP client
 httpx==0.25.2
