@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -22,6 +22,7 @@ class WorkspaceCreateRequest(BaseModel):
     init_command: Optional[str] = Field(None, description="Init command")
     ports: Optional[List[int]] = Field(default=None, description="Additional ports to expose")
     gitpod_compat: Optional[bool] = Field(default=False, description="If true, parse .gitpod.yml")
+    mode: Optional[Literal["personal", "team"]] = Field(default="personal", description="Workspace mode")
 
 
 class WorkspaceCreateResponse(BaseModel):
@@ -30,3 +31,31 @@ class WorkspaceCreateResponse(BaseModel):
     namespace: Optional[str] = None
     ideUrl: Optional[str] = None
 
+
+class WorkspaceItem(BaseModel):
+    id: str
+    userName: str
+    status: Optional[str] = None
+    namespace: Optional[str] = None
+    ideUrl: Optional[str] = None
+    createdAt: Optional[str] = None
+    templateId: Optional[str] = None
+
+
+class AdminBatchCreateRequest(BaseModel):
+    name: str
+    users: List[str]
+    template_id: Optional[str] = None
+    git_repository: Optional[HttpUrl] = None
+    ref: Optional[str] = None
+    image: Optional[str] = None
+    start_command: Optional[str] = None
+    init_command: Optional[str] = None
+    ports: Optional[List[int]] = None
+    gitpod_compat: Optional[bool] = False
+    mode: Optional[Literal["personal", "team"]] = "personal"
+
+
+class AdminBatchCreateResponse(BaseModel):
+    created: List[WorkspaceCreateResponse]
+    failed: List[str]
