@@ -4,6 +4,8 @@
   - `minikube start --cpus=4 --memory=8g`
 - Deploy CRD and controller:
   - `pwsh scripts/deploy_kubedev.ps1`
+- Create CR namespace:
+  - `kubectl apply -f k8s/users-namespace.yaml`
 - Run backend locally (separate shell):
   - `cd backend`
   - `pip install -r requirements.txt`
@@ -23,4 +25,4 @@ Notes
 - Controller image uses python:3.11-slim and installs kopf at runtime; ensure cluster egress is allowed.
 - Set wildcard IDE domain by editing `k8s/controller/deployment.yaml` ConfigMap `ide-domain`.
 - Default workspace image can be set via `default-image` (should include code-server).
-
+ - For manual testing without backend, apply `k8s/examples/sample_env.yaml`.

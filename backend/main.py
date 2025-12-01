@@ -1,7 +1,6 @@
-"""
-KubeDev Auto System - Main FastAPI Application
-K8s 기반 자동 개발 환경 프로비저닝 백엔드
-"""
+import os
+import sys
+import uvicorn
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -112,12 +111,18 @@ async def health_check():
                 "health_status": health_status
             }
         )
+# Try importing as a package; if that fails, add repo root to sys.path and retry
+try:
+    from backend.app import app  # type: ignore
+except ModuleNotFoundError:
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from backend.app import app  # type: ignore
+
+
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)
