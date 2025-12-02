@@ -265,7 +265,82 @@ class KubernetesService:
 
     async def get_live_resource_metrics(self, namespace: str) -> Dict[str, Any]:
         """실시간 리소스 메트릭 조회 (메트릭 서버 필요)"""
-        log.warning("Live resource metrics are not implemented", namespace=namespace)
-        return {
-            "note": "Metrics server required for live metrics"
-        }
+        self._check_k8s_availability()
+        log.info("Getting live resource metrics", namespace=namespace)
+
+        try:
+            # 해당 네임스페이스의 Pod들 조회
+            pods = self.v1.list_namespaced_pod(namespace=namespace)
+
+            metrics_data = {
+                "namespace": namespace,
+                "pods": []
+            }
+
+            for pod in pods.items:
+                pod_metrics = {
+                    "name": pod.metadata.name,
+                    "status": pod.status.phase,
+                    "cpu_usage_millicores": 0,  # 메트릭 서버 없이는 추정값
+                    "memory_usage_mb": 0,       # 메트릭 서버 없이는 추정값
+                    "ready": any(condition.status == "True" for condition in pod.status.conditions if condition.type == "Ready") if pod.status.conditions else False
+                }
+                metrics_data["pods"].append(pod_metrics)
+
+            log.info("Retrieved live metrics for namespace", namespace=namespace, pod_count=len(metrics_data["pods"]))
+            return metrics_data
+
+        except ApiException as e:
+            log.error("Failed to get live metrics", namespace=namespace, error=str(e), exc_info=True)
+            return {
+                "namespace": namespace,
+                "error": str(e),
+                "pods": []
+            }
+
+    async def scale_deployment(self, namespace: str, deployment_name: str, replicas: int) -> bool:
+        """Deployment 스케일 조정"""
+        self._check_k8s_availability()
+        log.info("Scaling deployment", namespace=namespace, deployment=deployment_name, replicas=replicas)
+
+        try:
+            # 현재 Deployment 조회
+            deployment = self.apps_v1.read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace
+            )
+
+            # 레플리카 수 변경
+            deployment.spec.replicas = replicas
+
+            # Deployment 업데이트
+            self.apps_v1.patch_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace,
+                body=deployment
+            )
+
+            log.info("Deployment scaled successfully", namespace=namespace, deployment=deployment_name, replicas=replicas)
+            return True
+
+        except ApiException as e:
+            log.error("Failed to scale deployment", namespace=namespace, deployment=deployment_name, replicas=replicas, error=str(e), exc_info=True)
+            return False
+
+    async def delete_namespace(self, namespace: str) -> bool:
+        """네임스페이스 및 모든 리소스 삭제"""
+        self._check_k8s_availability()
+        log.info("Deleting namespace and all resources", namespace=namespace)
+
+        try:
+            # 네임스페이스 삭제 (모든 리소스가 함께 삭제됨)
+            self.v1.delete_namespace(name=namespace)
+            log.info("Namespace deleted successfully", namespace=namespace)
+            return True
+
+        except ApiException as e:
+            if e.status == 404:
+                log.info("Namespace already deleted", namespace=namespace)
+                return True
+            log.error("Failed to delete namespace", namespace=namespace, error=str(e), exc_info=True)
+            return False
