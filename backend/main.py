@@ -3,6 +3,7 @@ import sys
 import uvicorn
 
 from fastapi import FastAPI, HTTPException
+
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import check_database_connection, create_all_tables
@@ -30,6 +31,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+
+
 
 # CORS 설정
 app.add_middleware(
