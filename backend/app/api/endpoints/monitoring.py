@@ -206,15 +206,12 @@ async def health_check():
 
 @router.get("/metrics")
 async def get_user_environment_metrics(
-    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """현재 사용자의 모든 환경 리소스 메트릭 조회"""
+    """모든 환경의 리소스 메트릭 조회 - 시연용 (인증 없음)"""
     try:
-        # 현재 사용자의 모든 환경 조회
-        environments = db.query(EnvironmentInstance).filter(
-            EnvironmentInstance.user_id == current_user.id
-        ).all()
+        # 모든 환경 조회 (시연용)
+        environments = db.query(EnvironmentInstance).all()
 
         if not environments:
             return []
@@ -231,7 +228,7 @@ async def get_user_environment_metrics(
                 if live_metrics and live_metrics.get("pods"):
                     for pod in live_metrics["pods"]:
                         metrics_list.append({
-                            "user_id": current_user.id,
+                            "user_id": env.user_id,
                             "environment_id": env.id,
                             "cpu": pod.get("cpu_usage_millicores", 0),  # 밀리코어 단위
                             "memory": pod.get("memory_usage_mb", 0),    # MB 단위
@@ -240,7 +237,7 @@ async def get_user_environment_metrics(
                 else:
                     # 메트릭을 가져올 수 없는 경우 기본값
                     metrics_list.append({
-                        "user_id": current_user.id,
+                        "user_id": env.user_id,
                         "environment_id": env.id,
                         "cpu": 0,
                         "memory": 0,
@@ -249,7 +246,7 @@ async def get_user_environment_metrics(
             except Exception as env_error:
                 # 개별 환경 오류는 기본값으로 처리하고 계속
                 metrics_list.append({
-                    "user_id": current_user.id,
+                    "user_id": env.user_id,
                     "environment_id": env.id,
                     "cpu": 0,
                     "memory": 0,
