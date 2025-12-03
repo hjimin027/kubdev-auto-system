@@ -26,6 +26,25 @@ from app.services.dockerfile_generator import DockerfileGenerator
 
 router = APIRouter()
 
+@router.post("/upload-yaml")
+async def upload_template_yaml(
+    current_user_id: int = Form(..., description="업로드하는 사용자 ID"),
+    yaml: UploadFile = File(..., description="템플릿 YAML 파일"),
+):
+    """
+    YAML 템플릿 파일 업로드 (프론트엔드 연동용)
+    """
+    try:
+        content = await yaml.read()
+        return {
+            "status": "uploaded",
+            "filename": yaml.filename,
+            "size": len(content),
+            "uploaded_by": current_user_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process YAML: {str(e)}")
+
 
 @router.post("/", response_model=ProjectTemplateResponse)
 async def create_template(

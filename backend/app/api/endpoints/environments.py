@@ -3,7 +3,7 @@ Environment API Endpoints
 개발 환경 관리 API
 """
 import structlog
-from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any
 import uuid
@@ -11,7 +11,7 @@ import yaml
 
 from app.core.database import get_db
 from app.models.environment import EnvironmentInstance, EnvironmentStatus
-
+from app.models.project_template import ProjectTemplate
 from app.models.user import User
 from app.schemas.environment import (
     EnvironmentResponse,
@@ -29,6 +29,7 @@ log = structlog.get_logger(__name__)
 
 @router.post("/create-from-yaml", response_model=Dict[str, Any])
 async def create_environment_from_yaml(
+    template_id: int = Form(...),
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -36,7 +37,13 @@ async def create_environment_from_yaml(
     """
     새로운 개발 환경을 KubeDevEnvironment CRD YAML 파일을 통해 생성합니다.
     """
-    log.info("Creating new environment from YAML", user_id=current_user.id, filename=file.filename)
+    log.info("Creating new environment from YAML", user_id=current_user.id, filename=file.filename, template_id=template_id)
+
+    # 0. Check if template exists
+    template = db.query(ProjectTemplate).filter(ProjectTemplate.id == template_id).first()
+    if not template:
+        log.warning("Template not found", template_id=template_id)
+        raise HTTPException(status_code=404, detail=f"ProjectTemplate with id {template_id} not found.")
 
     if not file.filename.lower().endswith(('.yaml', '.yml')):
         raise HTTPException(status_code=400, detail="Invalid file type. Only .yaml or .yml files are accepted.")
@@ -86,6 +93,7 @@ async def create_environment_from_yaml(
         env_name = custom_object.get("metadata", {}).get("name")
         environment = EnvironmentInstance(
             name=env_name,
+            template_id=template_id,
             user_id=current_user.id,
             k8s_namespace=custom_object.get("metadata", {}).get("namespace", "default"),
             k8s_deployment_name=env_name, # CRD 이름과 동일하게 설정 (컨트롤러의 규칙에 따라 달라질 수 있음)
@@ -134,6 +142,22 @@ async def list_environments(
     # 페이징
     offset = (page - 1) * size
     environments = query.offset(offset).limit(size).all()
+
+    # IDE URL 동적 생성 (CRD status에서 읽거나 minikube service URL 생성)
+    k8s_service = KubernetesService()
+    for env in environments:
+        if env.status == EnvironmentStatus.RUNNING and not env.access_url:
+            try:
+                # CRD status에서 ideUrl 읽기
+                crd_name = env.k8s_deployment_name
+                crd_namespace = "kubdev-users"
+                custom_obj = await k8s_service.get_custom_object(
+                    "kubedev.my-project.com", "v1alpha1", crd_namespace, "kubedevenvironments", crd_name
+                )
+                env.access_url = custom_obj.get("status", {}).get("ideUrl") or env.access_url
+            except Exception as e:
+                log.warning("Failed to get CRD status for IDE URL", env_id=env.id, error=str(e))
+
     log.info("Found environments", total=total, page_count=len(environments))
     return EnvironmentListResponse(
         environments=environments,
