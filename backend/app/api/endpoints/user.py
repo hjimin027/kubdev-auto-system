@@ -153,17 +153,16 @@ async def create_regular_user(
         
         logger.info(f"User created successfully: ID={new_user.id}, access_code={access_code}")
         
-        # 현재 로그인한 사용자가 생성한 템플릿 조회
+        # 아무 ACTIVE 템플릿 조회 (관리자는 모든 템플릿 사용 가능)
         template = db.query(ProjectTemplate).filter(
-            ProjectTemplate.created_by == user_data.current_user_id,
             ProjectTemplate.status == TemplateStatus.ACTIVE
         ).first()
-        
+
         if not template:
-            logger.error(f"No active template found for user {user_data.current_user_id}")
+            logger.error(f"No active template found in the system")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No active template found for current user"
+                detail=f"No active template found. Please create a template first."
             )
         
         logger.info(f"Using template: ID={template.id}, name={template.name}")
@@ -190,56 +189,61 @@ async def create_regular_user(
         db.refresh(new_environment)
         
         logger.info(f"Environment created successfully: ID={new_environment.id}, namespace={k8s_namespace}")
-        
-        # 실제 Kubernetes 리소스 생성
+
+        # KubeDevEnvironment CRD 생성 (컨트롤러가 자동으로 환경 프로비저닝)
         k8s_service = KubernetesService()
         try:
-            # 1. Namespace 생성
-            await k8s_service.create_namespace(k8s_namespace)
-            
-            # 2. Deployment 생성
-            resource_limits = {
-                "limits": {
-                    "cpu": template.resource_limits.get("cpu", "1000m"),
-                    "memory": template.resource_limits.get("memory", "2Gi")
+            # CRD 이름은 고유해야 함
+            crd_name = f"env-user-{new_user.id}"
+            crd_namespace = "kubdev-users"  # 모든 CRD는 kubdev-users 네임스페이스에 생성
+
+            # 템플릿에서 리소스 제한 추출
+            cpu_limit = template.resource_limits.get("cpu", "1000m") if template.resource_limits else "1000m"
+            memory_limit = template.resource_limits.get("memory", "2Gi") if template.resource_limits else "2Gi"
+            service_port = template.exposed_ports[0] if template.exposed_ports else 8080
+
+            # KubeDevEnvironment CRD 객체 생성
+            crd_object = {
+                "apiVersion": "kubedev.my-project.com/v1alpha1",
+                "kind": "KubeDevEnvironment",
+                "metadata": {
+                    "name": crd_name,
+                    "namespace": crd_namespace
                 },
-                "requests": {
-                    "cpu": template.resource_limits.get("cpu", "1000m"),
-                    "memory": template.resource_limits.get("memory", "2Gi")
+                "spec": {
+                    "userName": new_user.name,
+                    "gitRepository": template.default_git_repo or "",
+                    "image": template.base_image,
+                    "commands": {
+                        "init": "\n".join(template.init_scripts) if template.init_scripts else "",
+                        "start": "\n".join(template.post_start_commands) if template.post_start_commands else ""
+                    },
+                    "ports": template.exposed_ports or [8080],
+                    "storage": {
+                        "size": template.resource_limits.get("storage", "10Gi") if template.resource_limits else "10Gi"
+                    }
                 }
             }
-            
-            await k8s_service.create_deployment(
-                namespace=k8s_namespace,
-                deployment_name=k8s_deployment_name,
-                image=template.base_image,
-                environment_vars=template.environment_variables or {},
-                resource_limits=resource_limits
-            )
-            
-            # 3. Service 생성
-            service_port = template.exposed_ports[0] if template.exposed_ports else 8080
-            await k8s_service.create_service(
-                namespace=k8s_namespace,
-                service_name=f"svc-{new_user.id}",
-                deployment_name=k8s_deployment_name,
-                port=service_port
-            )
-            
-            # 4. Environment 상태 업데이트
+
+            # CRD 생성
+            logger.info(f"Creating KubeDevEnvironment CRD: {crd_name}")
+            await k8s_service.create_custom_object(crd_object)
+
+            # Environment DB 업데이트 (CRD가 생성되면 컨트롤러가 처리)
+            new_environment.k8s_namespace = crd_namespace
+            new_environment.k8s_deployment_name = crd_name
             new_environment.status = EnvironmentStatus.CREATING
             new_environment.external_port = service_port
-            new_environment.access_url = f"http://{k8s_namespace}.local:{service_port}"
             db.commit()
             db.refresh(new_environment)
-            
-            logger.info(f"Kubernetes resources created for environment {new_environment.id}")
-            
+
+            logger.info(f"KubeDevEnvironment CRD created for environment {new_environment.id}")
+
         except Exception as k8s_error:
-            logger.error(f"Failed to create Kubernetes resources: {str(k8s_error)}")
-            # K8s 리소스 생성 실패 시 환경 상태를 ERROR로 업데이트
+            logger.error(f"Failed to create KubeDevEnvironment CRD: {str(k8s_error)}")
+            # CRD 생성 실패 시 환경 상태를 ERROR로 업데이트
             new_environment.status = EnvironmentStatus.ERROR
-            new_environment.status_message = f"K8s creation failed: {str(k8s_error)}"
+            new_environment.status_message = f"CRD creation failed: {str(k8s_error)}"
             db.commit()
             db.refresh(new_environment)
         

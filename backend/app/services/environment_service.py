@@ -12,6 +12,7 @@ import structlog
 from app.models.environment import EnvironmentInstance, EnvironmentStatus
 from app.models.project_template import ProjectTemplate
 from app.services.kubernetes_service import KubernetesService
+from app.services.notification_service import notification_service
 from app.core.config import settings
 
 
@@ -307,6 +308,14 @@ echo "📁 작업 경로: /workspace"
             environment.status_message = "Environment stopped - scaled down to 0"
             self.db.commit()
             log.info("Environment stopped successfully")
+            
+            # 슬랙 알림 전송
+            try:
+                message = f"✅ 환경 중지: '{environment.name}' (ID: {environment.id}, 사용자: {environment.user.name})이(가) 중지되었습니다."
+                await notification_service.send_slack_notification(message)
+            except Exception as notify_error:
+                log.error("Failed to send Slack notification for stop event", error=str(notify_error))
+
             return {"message": "Environment stopped successfully - scaled down to 0"}
 
         except Exception as e:
@@ -377,6 +386,13 @@ echo "📁 작업 경로: /workspace"
             # 네임스페이스 전체 삭제 (모든 리소스 자동 정리)
             log.info("Deleting entire namespace to clean up all resources", namespace=environment.k8s_namespace)
             await self.k8s_service.delete_namespace(environment.k8s_namespace)
+
+            # 슬랙 알림 전송 (DB에서 삭제되기 전에 정보 사용)
+            try:
+                message = f"🗑️ 환경 삭제: '{environment.name}' (ID: {environment.id}, 사용자: {environment.user.name})이(가) 영구적으로 삭제되었습니다."
+                await notification_service.send_slack_notification(message)
+            except Exception as notify_error:
+                log.error("Failed to send Slack notification for delete event", error=str(notify_error))
 
             # 데이터베이스에서 환경 기록 삭제
             log.info("Deleting environment from database")
