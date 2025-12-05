@@ -7,6 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 import logging
+import os
+import structlog
+import re
+import unicodedata
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_active_user
@@ -19,12 +23,51 @@ from app.schemas.user import (
     UserCreateAdminResponse,
     UserCreateUser,
     UserCreateUserResponse,
+    UserCreateWithEnvironment,
+    UserCreateWithEnvironmentResponse,
 )
 from app.services.kubernetes_service import KubernetesService
+from app.services.environment_service import EnvironmentService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def sanitize_name_for_k8s(name: str) -> str:
+    """
+    사용자 이름을 Kubernetes RFC 1123 호환 형식으로 변환
+    - 소문자 영문자, 숫자, 하이픈만 허용
+    - 영문자 또는 숫자로 시작하고 끝나야 함
+    """
+    # Unicode 정규화 (한글 등 → 로마자 변환 시도)
+    normalized = unicodedata.normalize('NFKD', name)
+    # ASCII로 변환 가능한 문자만 추출
+    ascii_str = normalized.encode('ASCII', 'ignore').decode('ASCII')
+
+    # 공백을 하이픈으로 변환
+    sanitized = ascii_str.replace(' ', '-')
+    # 소문자로 변환
+    sanitized = sanitized.lower()
+    # 영문자, 숫자, 하이픈만 남기기
+    sanitized = re.sub(r'[^a-z0-9-]', '', sanitized)
+    # 연속된 하이픈 제거
+    sanitized = re.sub(r'-+', '-', sanitized)
+    # 앞뒤 하이픈 제거
+    sanitized = sanitized.strip('-')
+
+    # 비어있으면 기본값 사용
+    if not sanitized:
+        sanitized = "user"
+
+    # 영문자 또는 숫자로 시작하도록 보장
+    if sanitized and not sanitized[0].isalnum():
+        sanitized = 'u' + sanitized
+
+    # 최대 63자로 제한 (Kubernetes label 규칙)
+    sanitized = sanitized[:63]
+
+    return sanitized
 
 
 @router.post("/admin", response_model=UserCreateAdminResponse, status_code=status.HTTP_201_CREATED)
@@ -281,3 +324,108 @@ async def create_regular_user(
         )
 
 
+# 템플릿 ID와 YAML 파일 매핑
+# TODO: 나중에 DB에 저장하거나 설정 파일로 관리
+TEMPLATE_YAML_MAP = {
+    1: "demo_nodejs_working.yaml",
+    2: "demo_python_ml.yaml",
+    3: "demo_bash_simple.yaml",
+}
+
+
+@router.post("/user-with-environment", response_model=UserCreateWithEnvironmentResponse, status_code=status.HTTP_201_CREATED)
+async def create_user_with_environment(
+    user_data: UserCreateWithEnvironment,
+    db: Session = Depends(get_db)
+) -> UserCreateWithEnvironmentResponse:
+    """
+    사용자 생성 + 개발 환경 자동 생성 (Admin용)
+
+    템플릿을 선택하면 해당 템플릿의 YAML 파일로 환경을 자동 생성합니다.
+    Template : User = 1:1 관계
+    """
+    log = structlog.get_logger(__name__)
+    log.info("Creating user with environment", name=user_data.name, template_id=user_data.template_id)
+
+    try:
+        # 1. 사용자 계정 생성
+        access_code = generate_access_code()
+
+        # 중복 코드 확인
+        max_attempts = 10
+        for _ in range(max_attempts):
+            existing = db.query(User).filter(User.hashed_password == access_code).first()
+            if not existing:
+                break
+            access_code = generate_access_code()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate unique access code"
+            )
+
+        user = User(
+            name=user_data.name,
+            role=UserRole.USER,
+            hashed_password=access_code,
+            is_active=True
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        log.info("User created successfully", user_id=user.id, access_code=access_code)
+
+        # 2. 템플릿에 해당하는 YAML 파일 찾기
+        yaml_filename = TEMPLATE_YAML_MAP.get(user_data.template_id)
+        if not yaml_filename:
+            db.rollback()
+            log.error("Template YAML mapping not found", template_id=user_data.template_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Template ID {user_data.template_id}에 해당하는 YAML 파일이 없습니다."
+            )
+
+        # 3. YAML 파일 읽기
+        yaml_file_path = os.path.join(os.getcwd(), yaml_filename)
+        if not os.path.exists(yaml_file_path):
+            db.rollback()
+            log.error("YAML file not found", path=yaml_file_path)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"YAML 파일을 찾을 수 없습니다: {yaml_filename}"
+            )
+
+        with open(yaml_file_path, 'rb') as f:
+            yaml_content = f.read()
+
+        log.info("YAML file loaded", filename=yaml_filename)
+
+        # 4. 환경 생성 (공통 함수 재활용)
+        env_service = EnvironmentService(db, log)
+        result = await env_service.create_environment_from_yaml(
+            template_id=user_data.template_id,
+            user=user,
+            yaml_content=yaml_content
+        )
+
+        log.info("Environment created successfully",
+                user_id=user.id,
+                environment_id=result["environment_id"])
+
+        return UserCreateWithEnvironmentResponse(
+            user_id=user.id,
+            access_code=access_code,
+            environment_id=result["environment_id"],
+            environment_status=result["environment_status"]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log.error("Failed to create user with environment", error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"사용자 및 환경 생성 실패: {str(e)}"
+        )
