@@ -133,20 +133,94 @@ class KubernetesService:
     async def create_deployment(self, namespace: str, deployment_name: str, image: str, **kwargs) -> bool:
         """디플로이먼트 생성"""
         self._check_k8s_availability()
-        log.info("Creating deployment", namespace=namespace, name=deployment_name, image=image)
+        
+        git_repo = kwargs.get("git_repo")
+        git_branch = kwargs.get("git_branch", "main")
+        
+        log.info("Creating deployment", 
+                 namespace=namespace, 
+                 name=deployment_name, 
+                 image=image,
+                 git_repo=git_repo,
+                 git_branch=git_branch)
+        
         try:
             env_vars = [client.V1EnvVar(name=k, value=str(v)) for k, v in kwargs.get("environment_vars", {}).items()]
+            
+            # Volume 설정
+            volumes = []
+            volume_mounts = []
+            init_containers = []
+            
+            # Git 리포지토리가 있는 경우 Init Container 추가
+            if git_repo:
+                log.info("Setting up Git init container", repo=git_repo, branch=git_branch)
+                
+                # EmptyDir Volume 생성 (Init Container와 메인 컨테이너 간 공유)
+                volumes.append(client.V1Volume(
+                    name="workspace",
+                    empty_dir=client.V1EmptyDirVolumeSource()
+                ))
+                
+                # Git Clone Init Container
+                init_containers.append(client.V1Container(
+                    name="git-clone",
+                    image="alpine/git:latest",
+                    command=["/bin/sh", "-c"],
+                    args=[f"""
+set -e
+echo "🚀 KubeDev - Git 리포지토리 클론 시작"
+echo "📦 리포지토리: {git_repo}"
+echo "🌿 브랜치: {git_branch}"
+
+cd /workspace
+git clone -b {git_branch} {git_repo} .
+
+echo "✅ Git 클론 완료"
+ls -la /workspace
+                    """],
+                    volume_mounts=[client.V1VolumeMount(
+                        name="workspace",
+                        mount_path="/workspace"
+                    )]
+                ))
+                
+                # 메인 컨테이너에 workspace Volume Mount 추가
+                volume_mounts.append(client.V1VolumeMount(
+                    name="workspace",
+                    mount_path="/workspace"
+                ))
+                
+                # Git 설정 환경변수 추가
+                env_vars.extend([
+                    client.V1EnvVar(name="GIT_REPO", value=git_repo),
+                    client.V1EnvVar(name="GIT_BRANCH", value=git_branch),
+                    client.V1EnvVar(name="WORKSPACE", value="/workspace")
+                ])
+            
+            # 메인 컨테이너 생성
             container = client.V1Container(
                 name="dev-environment",
                 image=image,
                 ports=[client.V1ContainerPort(container_port=8080)],
                 env=env_vars,
-                resources=client.V1ResourceRequirements(**kwargs.get("resource_limits", {}))
+                resources=client.V1ResourceRequirements(**kwargs.get("resource_limits", {})),
+                volume_mounts=volume_mounts if volume_mounts else None,
+                working_dir="/workspace" if git_repo else None
             )
+            
+            # PodSpec 생성
+            pod_spec = client.V1PodSpec(
+                containers=[container],
+                init_containers=init_containers if init_containers else None,
+                volumes=volumes if volumes else None
+            )
+            
             template = client.V1PodTemplateSpec(
                 metadata=client.V1ObjectMeta(labels={"app": deployment_name, "kubdev.managed": "true"}),
-                spec=client.V1PodSpec(containers=[container])
+                spec=pod_spec
             )
+            
             deployment = client.V1Deployment(
                 metadata=client.V1ObjectMeta(name=deployment_name, namespace=namespace, labels={"kubdev.managed": "true"}),
                 spec=client.V1DeploymentSpec(
@@ -155,6 +229,7 @@ class KubernetesService:
                     template=template
                 )
             )
+            
             self.apps_v1.create_namespaced_deployment(namespace, deployment)
             log.info("Deployment created successfully", namespace=namespace, name=deployment_name)
             return True
@@ -513,3 +588,81 @@ class KubernetesService:
         except Exception as e:
             log.warning("Unexpected error getting service URL", service=service_name, namespace=namespace, error=str(e))
             return None
+
+    async def apply_custom_resource(self, custom_object: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        커스텀 리소스를 생성하거나 업데이트합니다. (apply 동작)
+        이미 존재하면 업데이트하고, 없으면 생성합니다.
+        """
+        self._check_k8s_availability()
+
+        api_version = custom_object.get("apiVersion")
+        kind = custom_object.get("kind")
+        metadata = custom_object.get("metadata", {})
+        namespace = metadata.get("namespace", "default")
+        name = metadata.get("name")
+
+        log.info("Applying custom resource", kind=kind, name=name, namespace=namespace)
+
+        if not all([api_version, kind, name]):
+            raise ValueError("Custom object must have apiVersion, kind, and metadata.name")
+
+        try:
+            group, version = api_version.split('/')
+
+            # kind에 따른 복수형 결정
+            if kind == "KubeDevEnvironment":
+                plural = "kubedevenvironments"
+            else:
+                plural = f"{kind.lower()}s"
+
+            # 먼저 리소스가 존재하는지 확인
+            try:
+                existing = self.custom_api.get_namespaced_custom_object(
+                    group=group,
+                    version=version,
+                    namespace=namespace,
+                    plural=plural,
+                    name=name
+                )
+                # 이미 존재하면 업데이트 (patch)
+                log.info("Custom resource exists, updating", kind=kind, name=name)
+                api_response = self.custom_api.patch_namespaced_custom_object(
+                    group=group,
+                    version=version,
+                    namespace=namespace,
+                    plural=plural,
+                    name=name,
+                    body=custom_object
+                )
+                log.info("Custom resource updated successfully", kind=kind, name=name)
+                return api_response
+            except ApiException as e:
+                if e.status == 404:
+                    # 존재하지 않으면 생성
+                    log.info("Custom resource does not exist, creating", kind=kind, name=name)
+                    api_response = self.custom_api.create_namespaced_custom_object(
+                        group=group,
+                        version=version,
+                        namespace=namespace,
+                        plural=plural,
+                        body=custom_object,
+                    )
+                    log.info("Custom resource created successfully", kind=kind, name=name)
+                    return api_response
+                else:
+                    raise
+
+        except ApiException as e:
+            error_body = e.body
+            if isinstance(error_body, bytes):
+                try:
+                    error_body = error_body.decode('utf-8')
+                except UnicodeDecodeError:
+                    error_body = error_body.decode('cp949', errors='ignore')
+
+            log.error("Failed to apply custom resource", kind=kind, name=name, error=error_body, exc_info=True)
+            raise Exception(f"Failed to apply custom resource: {error_body}")
+        except Exception as e:
+            log.error("An unexpected error occurred while applying custom resource", kind=kind, name=name, error=str(e), exc_info=True)
+            raise e

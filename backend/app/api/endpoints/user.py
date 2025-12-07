@@ -324,15 +324,6 @@ async def create_regular_user(
         )
 
 
-# 템플릿 ID와 YAML 파일 매핑
-# TODO: 나중에 DB에 저장하거나 설정 파일로 관리
-TEMPLATE_YAML_MAP = {
-    1: "demo_nodejs_working.yaml",
-    2: "demo_python_ml.yaml",
-    3: "demo_bash_simple.yaml",
-}
-
-
 @router.post("/user-with-environment", response_model=UserCreateWithEnvironmentResponse, status_code=status.HTTP_201_CREATED)
 async def create_user_with_environment(
     user_data: UserCreateWithEnvironment,
@@ -376,37 +367,27 @@ async def create_user_with_environment(
 
         log.info("User created successfully", user_id=user.id, access_code=access_code)
 
-        # 2. 템플릿에 해당하는 YAML 파일 찾기
-        yaml_filename = TEMPLATE_YAML_MAP.get(user_data.template_id)
-        if not yaml_filename:
+        # 2. DB에서 템플릿 조회
+        template = db.query(ProjectTemplate).filter(
+            ProjectTemplate.id == user_data.template_id,
+            ProjectTemplate.status == TemplateStatus.ACTIVE
+        ).first()
+
+        if not template:
             db.rollback()
-            log.error("Template YAML mapping not found", template_id=user_data.template_id)
+            log.error("Template not found or not active", template_id=user_data.template_id)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Template ID {user_data.template_id}에 해당하는 YAML 파일이 없습니다."
+                detail=f"Template ID {user_data.template_id}를 찾을 수 없거나 활성 상태가 아닙니다."
             )
 
-        # 3. YAML 파일 읽기
-        yaml_file_path = os.path.join(os.getcwd(), yaml_filename)
-        if not os.path.exists(yaml_file_path):
-            db.rollback()
-            log.error("YAML file not found", path=yaml_file_path)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"YAML 파일을 찾을 수 없습니다: {yaml_filename}"
-            )
+        log.info("Template found", template_id=template.id, template_name=template.name)
 
-        with open(yaml_file_path, 'rb') as f:
-            yaml_content = f.read()
-
-        log.info("YAML file loaded", filename=yaml_filename)
-
-        # 4. 환경 생성 (공통 함수 재활용)
+        # 3. 템플릿 정보로 환경 생성 (YAML 없이 직접 생성)
         env_service = EnvironmentService(db, log)
-        result = await env_service.create_environment_from_yaml(
-            template_id=user_data.template_id,
-            user=user,
-            yaml_content=yaml_content
+        result = await env_service.create_environment_from_template(
+            template=template,
+            user=user
         )
 
         log.info("Environment created successfully",

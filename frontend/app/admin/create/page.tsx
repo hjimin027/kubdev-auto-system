@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { createAdminAccount, createUserAccount, createUserWithEnvironment } from "@/lib/api"
+import { createAdminAccount, createUserAccount, createUserWithEnvironment, getTemplates } from "@/lib/api"
 
 export default function AdminCreatePage() {
   const router = useRouter()
@@ -14,7 +14,9 @@ export default function AdminCreatePage() {
   const [isEnvironmentSet, setIsEnvironmentSet] = useState(false)
 
   const [userId, setUserId] = useState("")
-  const [selectedTemplate, setSelectedTemplate] = useState<number>(3) // 기본값: demo_bash_simple
+  const [selectedTemplate, setSelectedTemplate] = useState<number>(0)
+  const [templates, setTemplates] = useState<Array<{ id: number; name: string; description: string; status: string }>>([])
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(true)
 
   const [generatedAccount, setGeneratedAccount] = useState<{
     type: "admin" | "user"
@@ -38,6 +40,24 @@ export default function AdminCreatePage() {
     if (savedEnvironment === "true") {
       setIsEnvironmentSet(true)
     }
+
+    // 템플릿 목록 불러오기
+    const loadTemplates = async () => {
+      setIsLoadingTemplates(true)
+      const result = await getTemplates()
+      if (result.success && result.data) {
+        const activeTemplates = result.data.templates.filter(
+          (template) => template.status === "active"
+        )
+        setTemplates(activeTemplates)
+        if (activeTemplates.length > 0) {
+          setSelectedTemplate(activeTemplates[0].id)
+        }
+      }
+      setIsLoadingTemplates(false)
+    }
+
+    loadTemplates()
   }, [router])
 
   const handleCreateAdminAccount = async () => {
@@ -239,12 +259,20 @@ export default function AdminCreatePage() {
                     id="template"
                     value={selectedTemplate}
                     onChange={(e) => setSelectedTemplate(Number(e.target.value))}
-                    disabled={isCreating}
+                    disabled={isCreating || isLoadingTemplates}
                     className="w-full h-10 px-3 py-2 text-sm bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
                   >
-                    <option value={1}>Node.js 개발 환경</option>
-                    <option value={2}>Python ML 환경</option>
-                    <option value={3}>Bash 간단 환경</option>
+                    {isLoadingTemplates ? (
+                      <option value={0}>템플릿 불러오는 중...</option>
+                    ) : templates.length === 0 ? (
+                      <option value={0}>사용 가능한 템플릿이 없습니다</option>
+                    ) : (
+                      templates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name}
+                        </option>
+                      ))
+                    )}
                   </select>
                   <p className="text-xs text-muted-foreground">
                     선택한 템플릿으로 개발 환경이 자동 생성됩니다

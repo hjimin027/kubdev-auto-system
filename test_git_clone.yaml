@@ -1,0 +1,46 @@
+apiVersion: kubedev.my-project.com/v1alpha1
+kind: KubeDevEnvironment
+metadata:
+  name: test-git-init-container
+  namespace: kubdev-users
+spec:
+  userName: "test-user"
+  gitRepository: "https://github.com/nodejs/nodejs.org.git"
+  
+  # Node.js 환경 이미지
+  image: "node:20-bookworm"
+  
+  commands:
+    init: |
+      echo "================================"
+      echo "✅ Git 클론 테스트"
+      echo "================================"
+      
+      cd /workspace
+      
+      # Git 리포지토리가 클론되었는지 확인
+      if [ -d ".git" ]; then
+        echo "✅ Git 리포지토리가 성공적으로 클론되었습니다!"
+        echo "📁 현재 디렉토리 내용:"
+        ls -la
+        echo ""
+        echo "🌿 Git 정보:"
+        git remote -v
+        git branch -a
+        git log -1 --oneline
+      else
+        echo "❌ Git 리포지토리가 클론되지 않았습니다."
+        exit 1
+      fi
+      
+    start: |
+      cd /workspace
+      echo "🚀 워크스페이스에서 작업 시작"
+      echo "📂 현재 위치: $(pwd)"
+      
+  ports:
+    - 8080
+  
+  storage:
+    size: "5Gi"
+    mountPath: "/workspace"

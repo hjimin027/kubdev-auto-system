@@ -351,7 +351,43 @@ export async function createTemplateFromYaml(
   }
 }
 
-// 11. 사용자 + 환경 통합 생성 (새로운 엔드포인트)
+// 11. 템플릿 목록 조회
+export async function getTemplates(): Promise<
+  ApiResponse<{
+    templates: Array<{
+      id: number;
+      name: string;
+      description: string;
+      status: string;
+    }>;
+    total: number;
+  }>
+> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/templates/?size=100`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        error: error.detail || "템플릿 목록을 가져올 수 없습니다",
+      };
+    }
+
+    const data = await response.json();
+    return { success: true, data };
+  } catch (error) {
+    console.error("[frontend] Get templates error:", error);
+    return { success: false, error: "서버와 통신할 수 없습니다" };
+  }
+}
+
+// 12. 사용자 + 환경 통합 생성 (새로운 엔드포인트)
 export async function createUserWithEnvironment(
   userName: string,
   templateId: number

@@ -75,7 +75,6 @@ class ProjectTemplateResponse(ProjectTemplateBase):
     created_by: int
     usage_count: int
     created_at: datetime
-    updated_at: Optional[datetime]
 
     class Config:
         from_attributes = True
