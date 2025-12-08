@@ -133,20 +133,116 @@ class KubernetesService:
     async def create_deployment(self, namespace: str, deployment_name: str, image: str, **kwargs) -> bool:
         """디플로이먼트 생성"""
         self._check_k8s_availability()
-        log.info("Creating deployment", namespace=namespace, name=deployment_name, image=image)
+        
+        git_repo = kwargs.get("git_repo")
+        git_branch = kwargs.get("git_branch", "main")
+        
+        log.info("Creating deployment", 
+                 namespace=namespace, 
+                 name=deployment_name, 
+                 image=image,
+                 git_repo=git_repo,
+                 git_branch=git_branch)
+        
         try:
             env_vars = [client.V1EnvVar(name=k, value=str(v)) for k, v in kwargs.get("environment_vars", {}).items()]
+            
+            # Volume 설정
+            volumes = []
+            volume_mounts = []
+            init_containers = []
+            
+            # Git 리포지토리가 있는 경우 Init Container 추가
+            if git_repo:
+                log.info("Setting up Git init container", repo=git_repo, branch=git_branch)
+                
+                # EmptyDir Volume 생성 (Init Container와 메인 컨테이너 간 공유)
+                volumes.append(client.V1Volume(
+                    name="workspace",
+                    empty_dir=client.V1EmptyDirVolumeSource()
+                ))
+                
+                # Git Clone Init Container
+                init_containers.append(client.V1Container(
+                    name="git-clone",
+                    image="alpine/git:latest",
+                    command=["/bin/sh", "-c"],
+                    args=[f"""
+set -e
+echo "🚀 KubeDev - Git 리포지토리 클론 시작"
+echo "📦 리포지토리: {git_repo}"
+echo "🌿 브랜치: {git_branch}"
+
+cd /workspace
+git clone -b {git_branch} {git_repo} .
+
+echo "✅ Git 클론 완료"
+ls -la /workspace
+                    """],
+                    volume_mounts=[client.V1VolumeMount(
+                        name="workspace",
+                        mount_path="/workspace"
+                    )]
+                ))
+                
+                # 메인 컨테이너에 workspace Volume Mount 추가
+                volume_mounts.append(client.V1VolumeMount(
+                    name="workspace",
+                    mount_path="/workspace"
+                ))
+                
+                # Git 설정 환경변수 추가
+                env_vars.extend([
+                    client.V1EnvVar(name="GIT_REPO", value=git_repo),
+                    client.V1EnvVar(name="GIT_BRANCH", value=git_branch),
+                    client.V1EnvVar(name="WORKSPACE", value="/workspace")
+                ])
+            
+            # code-server 시작 스크립트
+            start_script = """
+set -e
+echo "🚀 Starting development environment..."
+
+# workspace 디렉토리 생성
+mkdir -p /workspace
+
+# code-server가 설치되어 있으면 실행
+if command -v code-server >/dev/null 2>&1; then
+    echo "✅ Starting code-server on port 8080..."
+    code-server --bind-addr 0.0.0.0:8080 --auth none --user-data-dir /workspace/.vscode --extensions-dir /workspace/.vscode/extensions /workspace &
+else
+    echo "⚠️  code-server not found in image"
+fi
+
+# 컨테이너가 종료되지 않도록 유지
+tail -f /dev/null
+"""
+            
+            # 메인 컨테이너 생성
             container = client.V1Container(
                 name="dev-environment",
                 image=image,
                 ports=[client.V1ContainerPort(container_port=8080)],
                 env=env_vars,
-                resources=client.V1ResourceRequirements(**kwargs.get("resource_limits", {}))
+                command=["/bin/sh", "-c"],
+                args=[start_script],
+                resources=client.V1ResourceRequirements(**kwargs.get("resource_limits", {})),
+                volume_mounts=volume_mounts if volume_mounts else None,
+                working_dir="/workspace" if git_repo else None
             )
+            
+            # PodSpec 생성
+            pod_spec = client.V1PodSpec(
+                containers=[container],
+                init_containers=init_containers if init_containers else None,
+                volumes=volumes if volumes else None
+            )
+            
             template = client.V1PodTemplateSpec(
                 metadata=client.V1ObjectMeta(labels={"app": deployment_name, "kubdev.managed": "true"}),
-                spec=client.V1PodSpec(containers=[container])
+                spec=pod_spec
             )
+            
             deployment = client.V1Deployment(
                 metadata=client.V1ObjectMeta(name=deployment_name, namespace=namespace, labels={"kubdev.managed": "true"}),
                 spec=client.V1DeploymentSpec(
@@ -155,6 +251,7 @@ class KubernetesService:
                     template=template
                 )
             )
+            
             self.apps_v1.create_namespaced_deployment(namespace, deployment)
             log.info("Deployment created successfully", namespace=namespace, name=deployment_name)
             return True
@@ -497,15 +594,15 @@ class KubernetesService:
                 # For NodePort, use the NodePort number
                 node_port = service.spec.ports[0].node_port
                 url = f"http://localhost:{node_port}"
-                log.info("Generated NodePort URL", service=service_name, namespace=namespace, url=url, note="Using localhost - requires port forwarding")
+                log.info("Generated NodePort URL", service=service_name, namespace=namespace, url=url, node_port=node_port)
                 return url
             else:
-                # For ClusterIP and other types, use the service port
-                # This requires kubectl port-forward to work
+                # For ClusterIP services, we can't generate a reliable URL without knowing
+                # which port is being forwarded. Return a message indicating manual port-forward is needed.
+                log.info("ClusterIP service found - port-forward required", service=service_name, namespace=namespace, service_type=service.spec.type)
+                # Return kubectl port-forward command as placeholder
                 service_port = service.spec.ports[0].port
-                url = f"http://localhost:{service_port}"
-                log.info("Generated ClusterIP URL", service=service_name, namespace=namespace, url=url, service_type=service.spec.type, note="Using localhost - requires kubectl port-forward")
-                return url
+                return f"kubectl port-forward -n {namespace} svc/{service_name} 8080:{service_port}"
 
         except ApiException as e:
             log.warning("Failed to get service URL", service=service_name, namespace=namespace, error=str(e))

@@ -78,55 +78,17 @@ class EnvironmentService:
                 **template.environment_variables
             }
 
-            # Git 리포지토리 자동 클론 설정
+            # Git 리포지토리가 있는 경우 설정
+            git_repo = None
+            git_branch = "main"
+            
             if environment.git_repository:
+                git_repo = environment.git_repository
                 git_branch = environment.git_branch or "main"
-
-                # Git 관련 환경변수 추가
-                env_vars.update({
-                    "GIT_REPO": environment.git_repository,
-                    "GIT_BRANCH": git_branch,
-                    "WORKSPACE": "/workspace",
-                    "AUTO_CLONE_GIT": "true"
-                })
-
-                # Git 클론 스크립트를 환경변수로 전달 (컨테이너 시작시 실행됨)
-                git_clone_script = f"""#!/bin/bash
-echo "🚀 KubeDev Auto System - Git 리포지토리 자동 설정 시작"
-
-# 작업 디렉토리 생성
-mkdir -p /workspace
-cd /workspace
-
-# 기존 리포지토리가 있는지 확인
-if [ -d "/workspace/.git" ]; then
-    echo "📁 기존 Git 리포지토리 발견 - 업데이트 중..."
-    git fetch origin
-    git checkout {git_branch}
-    git pull origin {git_branch}
-else
-    echo "📥 Git 리포지토리 클론 중: {environment.git_repository}"
-    git clone -b {git_branch} {environment.git_repository} .
-    echo "✅ Git 리포지토리 클론 완료"
-fi
-
-# Git 사용자 설정 (VS Code에서 사용)
-git config --global user.name "KubeDev User"
-git config --global user.email "user@kubdev.local"
-git config --global init.defaultBranch main
-
-# 권한 설정
-chmod -R 755 /workspace
-chown -R 1000:1000 /workspace
-
-echo "🎉 Git 리포지토리 설정 완료!"
-echo "📂 리포지토리: {environment.git_repository}"
-echo "🌿 브랜치: {git_branch}"
-echo "📁 작업 경로: /workspace"
-"""
-
-                env_vars["GIT_CLONE_SCRIPT"] = git_clone_script
-                log.info("Git auto-clone configured", repo=environment.git_repository, branch=git_branch)
+                
+                log.info("Git repository configured", 
+                        repo=git_repo, 
+                        branch=git_branch)
 
             # 리소스 제한 설정
             resource_limits = template.resource_limits or {
@@ -134,15 +96,15 @@ echo "📁 작업 경로: /workspace"
                 "memory": settings.DEFAULT_MEMORY_LIMIT
             }
 
-            # Deployment 생성
+            # Deployment 생성 (Git 리포지토리 정보 전달)
             deployment_result = await self.k8s_service.create_deployment(
                 namespace=environment.k8s_namespace,
                 deployment_name=environment.k8s_deployment_name,
                 image=template.base_image,
                 environment_vars=env_vars,
                 resource_limits=resource_limits,
-                git_repo=environment.git_repository,
-                git_branch=environment.git_branch or "main"
+                git_repo=git_repo,
+                git_branch=git_branch
             )
             log.info("Deployment created", deployment_name=environment.k8s_deployment_name)
 

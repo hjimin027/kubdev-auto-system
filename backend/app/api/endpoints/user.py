@@ -390,13 +390,18 @@ async def create_user_with_environment(
             )
 
         # 3. YAML 파일 읽기
-        yaml_file_path = os.path.join(os.getcwd(), yaml_filename)
+        # 프로젝트 루트 디렉토리 찾기 (backend의 상위 디렉토리)
+        current_dir = os.path.dirname(os.path.abspath(__file__))  # endpoints 디렉토리
+        backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))  # backend 디렉토리
+        project_root = os.path.dirname(backend_dir)  # 프로젝트 루트
+        
+        yaml_file_path = os.path.join(project_root, yaml_filename)
         if not os.path.exists(yaml_file_path):
             db.rollback()
-            log.error("YAML file not found", path=yaml_file_path)
+            log.error("YAML file not found", path=yaml_file_path, cwd=os.getcwd())
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"YAML 파일을 찾을 수 없습니다: {yaml_filename}"
+                detail=f"YAML 파일을 찾을 수 없습니다: {yaml_filename} (찾은 경로: {yaml_file_path})"
             )
 
         with open(yaml_file_path, 'rb') as f:
@@ -484,10 +489,15 @@ async def create_user_with_environment_stream(
                 yield f"data: {json.dumps({'status': 'error', 'message': '❌ 템플릿 파일을 찾을 수 없습니다'})}\n\n"
                 return
 
-            yaml_file_path = os.path.join(os.getcwd(), yaml_filename)
+            # 프로젝트 루트 디렉토리 찾기 (backend의 상위 디렉토리)
+            current_dir = os.path.dirname(os.path.abspath(__file__))  # endpoints 디렉토리
+            backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))  # backend 디렉토리
+            project_root = os.path.dirname(backend_dir)  # 프로젝트 루트
+            
+            yaml_file_path = os.path.join(project_root, yaml_filename)
             if not os.path.exists(yaml_file_path):
                 db.rollback()
-                yield f"data: {json.dumps({'status': 'error', 'message': f'❌ YAML 파일 없음: {yaml_filename}'})}\n\n"
+                yield f"data: {json.dumps({'status': 'error', 'message': f'❌ YAML 파일 없음: {yaml_filename} (경로: {yaml_file_path})'})}\n\n"
                 return
 
             with open(yaml_file_path, 'rb') as f:
@@ -512,13 +522,13 @@ async def create_user_with_environment_stream(
             yield f"data: {json.dumps({'status': 'waiting_pod', 'message': '⏳ Pod 생성 대기 중...'})}\n\n"
             
             k8s_service = KubernetesService()
-            namespace = f"kubedev-{user.name.lower()}-env-user-{user.id}"
+            namespace = f"user-{user.id}"  # 실제 네임스페이스 형식에 맞춤
             
             for i in range(60):
                 await asyncio.sleep(1)
                 try:
                     # Pod 상태 확인
-                    pods = k8s_service.core_api.list_namespaced_pod(namespace=namespace)
+                    pods = k8s_service.v1.list_namespaced_pod(namespace=namespace)
                     if pods.items:
                         pod = pods.items[0]
                         phase = pod.status.phase
@@ -529,7 +539,7 @@ async def create_user_with_environment_stream(
                             yield f"data: {json.dumps({'status': 'pod_running', 'message': '🚀 Pod 실행 중!'})}\n\n"
                             
                             # Service URL 확인
-                            services = k8s_service.core_api.list_namespaced_service(namespace=namespace)
+                            services = k8s_service.v1.list_namespaced_service(namespace=namespace)
                             if services.items:
                                 svc = services.items[0]
                                 # NodePort 또는 ClusterIP 정보 추출
